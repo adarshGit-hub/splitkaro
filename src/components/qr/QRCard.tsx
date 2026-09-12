@@ -16,7 +16,7 @@ export default function QRCard({ participantName, amount, payeeVPA, payeeName, s
     payeeVPA: payeeVPA,
     payeeName: payeeName,
     amount: amount,
-    note: `SplitKaro: ${splitTitle}`,
+    note: `Split ${splitTitle}`,
   });
 
   return (

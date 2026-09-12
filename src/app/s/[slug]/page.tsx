@@ -5,10 +5,23 @@ import { useParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { useRealtimeParticipants } from '@/hooks/useRealtime';
 import { Split, Participant } from '@/types';
-import { generateUPILink } from '@/lib/upi';
+import { generateUPILink, generateAppIntentLink } from '@/lib/upi';
 import { generateQRDataURL } from '@/lib/qr';
+import { copyToClipboard } from '@/lib/share';
 import { cn } from '@/lib/utils';
-import { CheckCircle2, Clock, Smartphone, Info, QrCode, Share2, ShieldCheck, ChevronDown, ChevronUp } from 'lucide-react';
+import { 
+  CheckCircle2, 
+  Clock, 
+  Smartphone, 
+  Info, 
+  ShieldCheck, 
+  ChevronDown, 
+  ChevronUp, 
+  Copy, 
+  Check, 
+  AlertCircle,
+  ExternalLink
+} from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
 
@@ -22,6 +35,7 @@ export default function SettlementPage() {
   const [loadingSplit, setLoadingSplit] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<{ [key: string]: string }>({});
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!slug) return;
@@ -41,10 +55,40 @@ export default function SettlementPage() {
     };
     fetchSplit();
 
-    return () => { isMounted = false; };
+    // Subscribe to split updates (e.g. marked settled by creator)
+    const channel = supabase
+      .channel(`split-slug-${slug}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'splits',
+          filter: `share_slug=eq.${slug}`,
+        },
+        (payload: any) => {
+          if (isMounted && payload.new) {
+            setSplit((prev) => prev ? { ...prev, ...payload.new } : prev);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
   }, [slug]);
 
   const { participants, loading: loadingParticipants } = useRealtimeParticipants(split?.id || null);
+
+  const handleCopy = async (key: string, text: string) => {
+    const success = await copyToClipboard(text);
+    if (success) {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 2000);
+    }
+  };
 
   const handleMarkPaid = async (participantId: string) => {
     const { error } = await supabase
@@ -75,7 +119,7 @@ export default function SettlementPage() {
       payeeVPA: split.collector_upi_id || '',
       payeeName: split.collector_name || '',
       amount: participant.amount_owed,
-      note: `SplitKaro: ${split.title}`,
+      note: `Split ${split.title}`,
     });
     
     const qr = await generateQRDataURL(upiLink);
@@ -177,12 +221,17 @@ export default function SettlementPage() {
 
           {participants.map((p) => {
             const isExpanded = expandedId === p.id;
-            const upiLink = generateUPILink({
+            const upiParams = {
               payeeVPA: split.collector_upi_id || '',
               payeeName: split.collector_name || '',
               amount: p.amount_owed,
-              note: `SplitKaro: ${split.title}`,
-            });
+              note: `Split ${split.title}`,
+            };
+
+            const upiLink = generateUPILink(upiParams);
+            const gpayLink = generateAppIntentLink('gpay', upiParams);
+            const phonepeLink = generateAppIntentLink('phonepe', upiParams);
+            const paytmLink = generateAppIntentLink('paytm', upiParams);
 
             return (
               <div 
@@ -241,9 +290,111 @@ export default function SettlementPage() {
                 {/* Expanded Payment Drawer */}
                 {isExpanded && !p.has_paid && (
                   <div className="px-5 pb-5 pt-3 border-t border-slate-100 bg-slate-50/70 space-y-4">
-                    <div className="flex flex-col items-center">
+                    {/* Primary Pay Button */}
+                    <div className="space-y-2">
+                      <a 
+                        href={upiLink}
+                        className="w-full flex items-center justify-center gap-2 px-5 py-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white rounded-xl font-bold text-sm shadow-md shadow-emerald-200 transition-all cursor-pointer"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Smartphone className="w-4 h-4" />
+                        <span>Pay ₹{Number(p.amount_owed).toFixed(2)} via Any UPI App</span>
+                      </a>
+
+                      {/* Quick App Specific Buttons */}
+                      <div className="grid grid-cols-3 gap-2 pt-1" onClick={(e) => e.stopPropagation()}>
+                        <a
+                          href={gpayLink}
+                          className="flex items-center justify-center gap-1 py-2 px-2 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors text-center"
+                        >
+                          Google Pay
+                        </a>
+                        <a
+                          href={phonepeLink}
+                          className="flex items-center justify-center gap-1 py-2 px-2 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors text-center"
+                        >
+                          PhonePe
+                        </a>
+                        <a
+                          href={paytmLink}
+                          className="flex items-center justify-center gap-1 py-2 px-2 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors text-center"
+                        >
+                          Paytm
+                        </a>
+                      </div>
+                    </div>
+
+                    {/* Copy UPI ID Card (Guaranteed Bank-Proof Fallback) */}
+                    {split.collector_upi_id && (
+                      <div 
+                        className="p-3.5 bg-white border border-amber-200/80 rounded-2xl space-y-2.5 shadow-2xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <p className="text-[11px] text-slate-600 leading-tight">
+                            <span className="font-bold text-slate-800">Bank risk policy error?</span> If your UPI app blocks browser-initiated transfers, copy the UPI ID below and send directly from your UPI app:
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+                          <div className="min-w-0 mr-2">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">UPI ID</span>
+                            <span className="text-xs font-mono font-bold text-slate-900 truncate block">
+                              {split.collector_upi_id}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(`upi-${p.id}`, split.collector_upi_id || '')}
+                            className="flex items-center gap-1 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer"
+                          >
+                            {copiedKey === `upi-${p.id}` ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-300" />
+                                <span>Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Copy ID</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+                          <div>
+                            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Amount</span>
+                            <span className="text-xs font-extrabold text-slate-900">
+                              ₹{Number(p.amount_owed).toFixed(2)}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(`amt-${p.id}`, Number(p.amount_owed).toFixed(2))}
+                            className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer"
+                          >
+                            {copiedKey === `amt-${p.id}` ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-600" />
+                                <span>Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Copy ₹</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* QR Code Section */}
+                    <div className="flex flex-col items-center pt-1" onClick={(e) => e.stopPropagation()}>
                       {qrCode[p.id] ? (
-                        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm mb-3">
+                        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm mb-2">
                           <Image 
                             src={qrCode[p.id]} 
                             alt={`UPI QR code for ${p.name}`} 
@@ -253,30 +404,19 @@ export default function SettlementPage() {
                           />
                         </div>
                       ) : (
-                        <div className="h-44 w-44 bg-slate-200 animate-pulse rounded-2xl mb-3"></div>
+                        <div className="h-44 w-44 bg-slate-200 animate-pulse rounded-2xl mb-2"></div>
                       )}
                       
-                      <p className="text-xs font-semibold text-slate-600 text-center max-w-xs">
-                        Scan with Google Pay, PhonePe, Paytm, or BHIM to pay <span className="text-slate-900 font-bold">{split.collector_name}</span>
+                      <p className="text-[11px] font-semibold text-slate-500 text-center max-w-xs">
+                        Or scan QR with any UPI app scanner (never blocked by browser policy)
                       </p>
                     </div>
 
-                    <div className="space-y-2.5">
-                      <a 
-                        href={upiLink}
-                        className="w-full flex items-center justify-center gap-2 px-5 py-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white rounded-xl font-bold text-sm shadow-md shadow-emerald-200 transition-all cursor-pointer"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Smartphone className="w-4 h-4" />
-                        <span>Pay ₹{Number(p.amount_owed).toFixed(2)} via UPI App</span>
-                      </a>
-                      
+                    {/* Mark Paid Confirmation */}
+                    <div className="pt-2 border-t border-slate-200/60" onClick={(e) => e.stopPropagation()}>
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleMarkPaid(p.id);
-                        }}
+                        onClick={() => handleMarkPaid(p.id)}
                         className="w-full flex items-center justify-center gap-2 px-5 py-3 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl font-bold text-xs transition-colors cursor-pointer"
                       >
                         <CheckCircle2 className="w-4 h-4 text-emerald-600" />

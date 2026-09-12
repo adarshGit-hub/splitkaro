@@ -39,7 +39,7 @@ export default function SplitDetailPage() {
       const payeeVPA = data.collector_upi_id || data.profiles?.upi_id;
       const payeeName = data.collector_name || data.profiles?.name || '';
       if (payeeVPA) {
-        generateUPIQR({ payeeVPA, payeeName, amount: Number(data.total_amount), note: `Split: ${data.title}` }).then(setQrCodeUrl);
+        generateUPIQR({ payeeVPA, payeeName, amount: Number(data.total_amount), note: `Split ${data.title}` }).then(setQrCodeUrl);
       }
     }
     setLoading(false);
