@@ -225,7 +225,8 @@ export default function SettlementPage() {
               payeeVPA: split.collector_upi_id || '',
               payeeName: split.collector_name || '',
               amount: p.amount_owed,
-              note: `Split ${split.title}`,
+              note: `Payment to ${split.collector_name || 'Split'}`,
+              transactionRef: `SP${split.id.replace(/-/g, '').slice(0, 8)}${p.id.replace(/-/g, '').slice(0, 8)}`,
             };
 
             const upiLink = generateUPILink(upiParams);
@@ -322,6 +323,9 @@ export default function SettlementPage() {
                           Paytm
                         </a>
                       </div>
+                      <p className="text-[10px] text-slate-500 text-center pt-1">
+                        💡 Note: Banks block paying to your own UPI ID. Test using a friend&apos;s account.
+                      </p>
                     </div>
 
                     {/* Copy UPI ID Card (Guaranteed Bank-Proof Fallback) */}
