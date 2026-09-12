@@ -53,6 +53,17 @@ export default function SettlementPage() {
       .eq('id', participantId);
     if (error) {
       alert('Failed to update payment status. Please try again.');
+      return;
+    }
+
+    if (split) {
+      const allOthersPaid = participants
+        .filter(p => p.id !== participantId)
+        .every(p => p.has_paid);
+      if (allOthersPaid && !split.is_settled) {
+        await supabase.from('splits').update({ is_settled: true }).eq('id', split.id);
+        setSplit(prev => prev ? { ...prev, is_settled: true } : null);
+      }
     }
   };
 

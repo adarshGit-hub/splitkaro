@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Split } from '@/types';
 import Link from 'next/link';
-import { PlusCircle, IndianRupee, Clock, CheckCircle, Receipt } from 'lucide-react';
-// import SplitCard from '@/components/split/SplitCard';
+import { PlusCircle, Clock, CheckCircle, Receipt, ChevronRight } from 'lucide-react';
 
 const supabase = createClient();
 
@@ -14,33 +13,59 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'active' | 'settled'>('all');
 
+  const fetchSplits = useCallback(async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setSplits([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('splits')
+        .select('*, participants(*)')
+        .eq('creator_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (data && !error) {
+        setSplits(data as Split[]);
+      }
+    } catch (err) {
+      console.error('Error fetching dashboard splits:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     let isMounted = true;
-    const fetchSplits = async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user || !isMounted) {
-          if (isMounted) setSplits([]);
-          return;
-        }
-
-        const { data, error } = await supabase
-          .from('splits')
-          .select('*')
-          .eq('creator_id', user.id)
-          .order('created_at', { ascending: false });
-
-        if (data && !error && isMounted) {
-          setSplits(data);
-        }
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
 
     fetchSplits();
-    return () => { isMounted = false; };
-  }, []);
+
+    // Setup Supabase Realtime subscriptions for live dashboard updates
+    const channel = supabase
+      .channel('dashboard-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'participants' },
+        () => {
+          if (isMounted) fetchSplits();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'splits' },
+        () => {
+          if (isMounted) fetchSplits();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [fetchSplits]);
 
   const filteredSplits = splits.filter(s => {
     if (filter === 'active') return s.is_settled === false;
@@ -48,8 +73,23 @@ export default function DashboardPage() {
     return true;
   });
 
-  const totalCollected = splits.filter(s => s.is_settled === true).reduce((sum, s) => sum + Number(s.total_amount), 0);
-  const totalPending = splits.filter(s => s.is_settled === false).reduce((sum, s) => sum + Number(s.total_amount), 0);
+  // Calculate actual collected amount based on participant payments + settled status
+  const totalCollected = splits.reduce((sum, s) => {
+    if (s.is_settled) return sum + Number(s.total_amount);
+    const paidSum = s.participants
+      ?.filter(p => p.has_paid)
+      .reduce((acc, p) => acc + Number(p.amount_owed), 0) || 0;
+    return sum + paidSum;
+  }, 0);
+
+  // Calculate actual pending amount based on unpaid participants for unsettled splits
+  const totalPending = splits.reduce((sum, s) => {
+    if (s.is_settled) return sum;
+    const unpaidSum = s.participants
+      ?.filter(p => !p.has_paid)
+      .reduce((acc, p) => acc + Number(p.amount_owed), 0) || 0;
+    return sum + unpaidSum;
+  }, 0);
 
   return (
     <div className="max-w-3xl mx-auto p-4 md:p-6 pb-24">
@@ -67,6 +107,7 @@ export default function DashboardPage() {
         </Link>
       </div>
 
+      {/* Metrics Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
         <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
           <div className="flex items-center text-gray-500 mb-2">
@@ -80,17 +121,18 @@ export default function DashboardPage() {
             <CheckCircle className="w-4 h-4 mr-2" />
             <span className="text-xs font-medium uppercase tracking-wider">Collected</span>
           </div>
-          <p className="text-2xl font-bold text-green-700">₹{totalCollected}</p>
+          <p className="text-2xl font-bold text-green-700">₹{totalCollected.toFixed(0)}</p>
         </div>
         <div className="bg-amber-50 p-5 rounded-2xl border border-amber-100 shadow-sm col-span-2 md:col-span-1">
           <div className="flex items-center text-amber-600 mb-2">
             <Clock className="w-4 h-4 mr-2" />
             <span className="text-xs font-medium uppercase tracking-wider">Pending</span>
           </div>
-          <p className="text-2xl font-bold text-amber-700">₹{totalPending}</p>
+          <p className="text-2xl font-bold text-amber-700">₹{totalPending.toFixed(0)}</p>
         </div>
       </div>
 
+      {/* Filter Tabs */}
       <div className="mb-6">
         <div className="flex space-x-2 border-b border-gray-200 pb-px">
           {(['all', 'active', 'settled'] as const).map((f) => (
@@ -109,24 +151,63 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Splits List */}
       {loading ? (
         <div className="flex justify-center py-12">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
         </div>
       ) : filteredSplits.length > 0 ? (
-        <div className="space-y-4">
-          {filteredSplits.map(split => (
-            <div key={split.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-gray-900">{split.title}</h3>
-                <p className="text-sm text-gray-500">₹{Number(split.total_amount)}</p>
-              </div>
-              <Link href={`/split/${split.id}`} className="text-sm text-indigo-600 font-medium px-3 py-1.5 bg-indigo-50 rounded-lg hover:bg-indigo-100">
-                View
+        <div className="space-y-3">
+          {filteredSplits.map(split => {
+            const totalParts = split.participants?.length || 0;
+            const paidParts = split.participants?.filter(p => p.has_paid).length || 0;
+            const isAllPaid = totalParts > 0 && paidParts === totalParts;
+
+            return (
+              <Link 
+                key={split.id} 
+                href={`/split/${split.id}`}
+                className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:border-gray-200 hover:shadow-md transition-all flex items-center justify-between group block"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors">
+                      {split.title}
+                    </h3>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600">
+                      {split.category || 'Other'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                    <span className="font-bold text-gray-900 text-sm">
+                      ₹{Number(split.total_amount).toFixed(2)}
+                    </span>
+                    <span>•</span>
+                    {split.is_settled ? (
+                      <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md">
+                        Settled
+                      </span>
+                    ) : isAllPaid ? (
+                      <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md">
+                        All {totalParts} Paid
+                      </span>
+                    ) : (
+                      <span className="text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded-md">
+                        {paidParts} of {totalParts} paid
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-indigo-600 font-medium px-3 py-1.5 bg-indigo-50 rounded-lg group-hover:bg-indigo-100 transition-colors">
+                    View
+                  </span>
+                  <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-indigo-600 transition-colors" />
+                </div>
               </Link>
-            </div>
-            // <SplitCard key={split.id} split={split} />
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="text-center py-16 bg-white rounded-2xl border border-gray-100 border-dashed">

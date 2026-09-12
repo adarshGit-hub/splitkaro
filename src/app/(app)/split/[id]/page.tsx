@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useSplit } from '@/hooks/useSplit';
 import { Share2, CheckCircle, Clock, ArrowLeft, Trash2, IndianRupee, MessageCircle, Link as LinkIcon } from 'lucide-react';
@@ -9,7 +9,6 @@ import { format } from 'date-fns';
 import { createClient } from '@/lib/supabase/client';
 import { shareLink, generateWhatsAppLink, copyToClipboard } from '@/lib/share';
 import { generateUPIQR } from '@/lib/qr';
-import { generateUPILink } from '@/lib/upi';
 import Image from 'next/image';
 
 const supabase = createClient();
@@ -31,11 +30,8 @@ export default function SplitDetailPage() {
     setOrigin(window.location.origin);
   }, []);
 
-  useEffect(() => {
-    fetchSplitData();
-  }, [id]);
-
-  const fetchSplitData = async () => {
+  const fetchSplitData = useCallback(async () => {
+    if (!id) return;
     const data = await getSplit(id);
     if (data) {
       setSplit(data);
@@ -47,25 +43,80 @@ export default function SplitDetailPage() {
       }
     }
     setLoading(false);
-  };
+  }, [id, getSplit]);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchSplitData();
+
+    // Subscribe to realtime updates for this split's participants and split changes
+    const channel = supabase
+      .channel(`split-detail-${id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'participants',
+          filter: `split_id=eq.${id}`,
+        },
+        () => {
+          if (isMounted) fetchSplitData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'splits',
+          filter: `id=eq.${id}`,
+        },
+        (payload: any) => {
+          if (isMounted && payload.new) {
+            setSplit((prev: any) => prev ? { ...prev, ...payload.new } : prev);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [id, fetchSplitData]);
 
   const handleTogglePaid = async (participantId: string, currentStatus: boolean) => {
+    const newStatus = !currentStatus;
     const { error } = await supabase
       .from('participants')
       .update({ 
-        has_paid: !currentStatus,
-        paid_at: !currentStatus ? new Date().toISOString() : null,
-        marked_paid_by: !currentStatus ? 'collector' : null,
+        has_paid: newStatus,
+        paid_at: newStatus ? new Date().toISOString() : null,
+        marked_paid_by: newStatus ? 'collector' : null,
       })
       .eq('id', participantId);
       
     if (!error) {
-      setSplit((prev: any) => ({
-        ...prev,
-        participants: prev.participants.map((p: any) => 
-          p.id === participantId ? { ...p, has_paid: !currentStatus, paid_at: !currentStatus ? new Date().toISOString() : null, marked_paid_by: !currentStatus ? 'collector' : null } : p
-        )
-      }));
+      setSplit((prev: any) => {
+        if (!prev) return prev;
+        const updatedParticipants = prev.participants.map((p: any) => 
+          p.id === participantId 
+            ? { ...p, has_paid: newStatus, paid_at: newStatus ? new Date().toISOString() : null, marked_paid_by: newStatus ? 'collector' : null } 
+            : p
+        );
+
+        const allPaid = updatedParticipants.length > 0 && updatedParticipants.every((p: any) => p.has_paid);
+        if (allPaid && !prev.is_settled) {
+          supabase.from('splits').update({ is_settled: true }).eq('id', id).then();
+          return { ...prev, participants: updatedParticipants, is_settled: true };
+        } else if (!allPaid && prev.is_settled) {
+          supabase.from('splits').update({ is_settled: false }).eq('id', id).then();
+          return { ...prev, participants: updatedParticipants, is_settled: false };
+        }
+
+        return { ...prev, participants: updatedParticipants };
+      });
     }
   };
 
@@ -234,7 +285,7 @@ export default function SplitDetailPage() {
               </div>
               <button
                 onClick={() => handleTogglePaid(p.id, p.has_paid)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors cursor-pointer ${
                   p.has_paid 
                     ? 'bg-green-100 text-green-700 hover:bg-green-200' 
                     : 'bg-orange-100 text-orange-700 hover:bg-orange-200'
